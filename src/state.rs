@@ -3,8 +3,8 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::{
-    config::Config,
-    nlp::{ClaudeClient, IntentParser},
+    config::{Config, NlpProvider},
+    nlp::{ClaudeClient, IntentParser, OpenAiCompatClient},
     stt::{SttProvider, WhisperClient},
     whatsapp::WhatsAppClient,
 };
@@ -23,7 +23,10 @@ impl AppState {
     pub fn new(config: Config, db: PgPool) -> Self {
         let whatsapp = WhatsAppClient::new(&config);
         let stt: Arc<dyn SttProvider> = Arc::new(WhisperClient::new(&config));
-        let parser: Arc<dyn IntentParser> = Arc::new(ClaudeClient::new(&config));
+        let parser: Arc<dyn IntentParser> = match config.nlp_provider {
+            NlpProvider::Anthropic => Arc::new(ClaudeClient::new(&config)),
+            NlpProvider::OpenAiCompat => Arc::new(OpenAiCompatClient::new(&config)),
+        };
 
         Self {
             config: Arc::new(config),

@@ -1,9 +1,11 @@
 pub mod claude;
 pub mod intent;
+pub mod openai_compat;
 pub mod prompt;
 
 pub use claude::ClaudeClient;
 pub use intent::{rupees_to_paisa, Command, Missing, ParsedCommand, Period, TxKind};
+pub use openai_compat::OpenAiCompatClient;
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};

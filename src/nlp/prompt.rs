@@ -1,6 +1,7 @@
 use crate::nlp::ParseContext;
 
-const SYSTEM_TEMPLATE: &str = r#"You are the language-understanding engine of "Awaaz", a WhatsApp voice assistant for small business owners in Pakistan. Speakers use Urdu, Punjabi, Pashto, Sindhi or English, often mixed together. You receive a speech-to-text transcript of one voice note and must call the record_command tool exactly once, describing the single command the speaker wants.
+/// Shared instructions. The last lines (how to hand the answer back) differ per provider.
+const SYSTEM_TEMPLATE: &str = r#"You are the language-understanding engine of "Awaaz", a WhatsApp voice assistant for small business owners in Pakistan. Speakers use Urdu, Punjabi, Pashto, Sindhi or English, often mixed together. You receive a speech-to-text transcript of one voice note and must work out the single command the speaker wants.
 
 TODAY: {TODAY}
 KNOWN EMPLOYEES: {EMPLOYEES}
@@ -41,17 +42,39 @@ INTENTS (put the choice in "intent")
 OUTPUT
 - spoken_language = the main language of the speaker: ur, pa, ps, sd or en.
 - One command per voice note. If several are spoken, choose the first complete one.
-- Match spoken employee and customer names to the known lists when they sound alike, and use the listed spelling.
-- Always answer by calling record_command. Never reply with plain text."#;
+- Match spoken employee and customer names to the known lists when they sound alike, and use the listed spelling."#;
 
-/// The fixed instructions plus today's date and the names this business already uses.
-pub fn system_prompt(ctx: &ParseContext) -> String {
+/// For providers that support forced tool calls (Anthropic).
+const TOOL_TAIL: &str =
+    "- Always answer by calling record_command. Never reply with plain text.";
+
+/// For providers that only support plain JSON output (Groq, Gemini, Ollama, OpenRouter...).
+const JSON_TAIL: &str = r#"- Reply with ONLY one JSON object. No markdown, no code fences, no explanation.
+- Use these field names: spoken_language, intent, and only the fields that belong to the chosen intent: kind, amount, on_credit, party_name, description (record_transaction); assignee_name, title, due_date (assign_task); task_hint, assignee_name (complete_task); name, phone (add_employee); period (query_summary); party_name (query_party); assignee_name (query_tasks); language (set_language); reason (unclear).
+- Use null for anything that was not spoken. amount is a plain number. on_credit is true or false.
+
+Examples of valid replies:
+{"spoken_language":"ur","intent":"record_transaction","kind":"sale","amount":2500,"on_credit":true,"party_name":"Ali","description":"cloth"}
+{"spoken_language":"pa","intent":"assign_task","assignee_name":"Bilal","title":"Deliver the order to Lahore","due_date":"2026-11-23"}
+{"spoken_language":"en","intent":"query_summary","period":"today"}"#;
+
+fn base_prompt(ctx: &ParseContext) -> String {
     let today = format!("{} ({})", ctx.today.format("%Y-%m-%d"), ctx.today.format("%A"));
 
     SYSTEM_TEMPLATE
         .replace("{TODAY}", &today)
         .replace("{EMPLOYEES}", &name_list(&ctx.employee_names))
         .replace("{PARTIES}", &name_list(&ctx.party_names))
+}
+
+/// Instructions for providers that answer through a forced tool call (Anthropic).
+pub fn system_prompt(ctx: &ParseContext) -> String {
+    format!("{}\n{}", base_prompt(ctx), TOOL_TAIL)
+}
+
+/// Instructions for providers that answer with a JSON object (OpenAI-compatible APIs).
+pub fn system_prompt_json(ctx: &ParseContext) -> String {
+    format!("{}\n{}", base_prompt(ctx), JSON_TAIL)
 }
 
 /// The transcript wrapped in tags so the model treats it as data, not as instructions.
@@ -88,7 +111,16 @@ mod tests {
         assert!(prompt.contains("2026-11-22 (Sunday)"));
         assert!(prompt.contains("Bilal, Usman"));
         assert!(prompt.contains("KNOWN CUSTOMERS AND SUPPLIERS: none yet"));
+        assert!(prompt.contains("record_command"));
         assert!(!prompt.contains("{TODAY}"));
+    }
+
+    #[test]
+    fn json_prompt_asks_for_a_json_object() {
+        let prompt = system_prompt_json(&ctx());
+        assert!(prompt.contains("ONLY one JSON object"));
+        assert!(prompt.contains("\"intent\":\"query_summary\""));
+        assert!(!prompt.contains("record_command"));
     }
 
     #[test]

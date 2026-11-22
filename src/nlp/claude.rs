@@ -17,6 +17,7 @@ const MAX_ATTEMPTS: u64 = 3;
 
 /// Claude API client that turns a transcript into a structured command.
 /// The model is forced to call one tool, so the answer is always structured JSON.
+/// Used when NLP_PROVIDER=anthropic; it reads NLP_API_KEY and NLP_MODEL.
 pub struct ClaudeClient {
     http: Client,
     api_key: String,
@@ -32,8 +33,8 @@ impl ClaudeClient {
 
         Self {
             http,
-            api_key: config.anthropic_api_key.clone(),
-            model: config.claude_model.clone(),
+            api_key: config.nlp_api_key.clone(),
+            model: config.nlp_model.clone(),
         }
     }
 

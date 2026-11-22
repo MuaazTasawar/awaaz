@@ -13,10 +13,11 @@ use crate::{
     stt::{SttProvider, Transcript},
 };
 
-const TRANSCRIBE_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
-
 /// Anything shorter than this is not a real voice note (a one-second WhatsApp note is several KB).
 const MIN_AUDIO_BYTES: usize = 500;
+
+/// Free tiers answer 429 when you go over the per-minute limit; wait and try again a couple of times.
+const MAX_ATTEMPTS: u64 = 3;
 
 /// Languages Whisper accepts as a hint for the languages Awaaz supports.
 const WHISPER_LANGS: [&str; 5] = ["ur", "pa", "ps", "sd", "en"];
@@ -26,8 +27,11 @@ const WHISPER_LANGS: [&str; 5] = ["ur", "pa", "ps", "sd", "en"];
 const URDU_PROMPT: &str =
     "کاروبار کا حساب: بیچا، خریدا، ادھار، وصول ہوئے، ہزار روپے، لاکھ روپے، کل تک کام مکمل کرنا۔";
 
+/// Client for any OpenAI-compatible `/audio/transcriptions` endpoint
+/// (Groq, OpenAI, or a local Whisper server).
 pub struct WhisperClient {
     http: Client,
+    url: String,
     api_key: String,
     model: String,
 }
@@ -49,26 +53,16 @@ impl WhisperClient {
 
         Self {
             http,
-            api_key: config.openai_api_key.clone(),
-            model: config.whisper_model.clone(),
+            url: format!("{}/audio/transcriptions", config.stt_base_url),
+            api_key: config.stt_api_key.clone(),
+            model: config.stt_model.clone(),
         }
     }
-}
 
-#[async_trait]
-impl SttProvider for WhisperClient {
-    async fn transcribe(
-        &self,
-        audio: Vec<u8>,
-        mime_type: &str,
-        language_hint: Option<&str>,
-    ) -> Result<Transcript> {
-        if audio.len() < MIN_AUDIO_BYTES {
-            return Err(AppError::Stt("audio too short".to_string()));
-        }
-
+    /// The upload form is rebuilt for every attempt because sending consumes it.
+    fn build_form(&self, audio: &[u8], mime_type: &str, language_hint: Option<&str>) -> Result<Form> {
         let (ext, mime) = audio_format(mime_type);
-        let part = Part::bytes(audio)
+        let part = Part::bytes(audio.to_vec())
             .file_name(format!("voice.{ext}"))
             .mime_str(mime)
             .map_err(|e| AppError::Stt(e.to_string()))?;
@@ -88,35 +82,73 @@ impl SttProvider for WhisperClient {
             }
         }
 
-        let resp = self
-            .http
-            .post(TRANSCRIBE_URL)
-            .bearer_auth(&self.api_key)
-            .multipart(form)
-            .send()
-            .await?;
+        Ok(form)
+    }
+}
 
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let short: String = text.chars().take(300).collect();
-            return Err(AppError::Stt(format!("{status}: {short}")));
+#[async_trait]
+impl SttProvider for WhisperClient {
+    async fn transcribe(
+        &self,
+        audio: Vec<u8>,
+        mime_type: &str,
+        language_hint: Option<&str>,
+    ) -> Result<Transcript> {
+        if audio.len() < MIN_AUDIO_BYTES {
+            return Err(AppError::Stt("audio too short".to_string()));
         }
 
-        let parsed: WhisperResponse = resp.json().await?;
-        let text = parsed.text.trim().to_string();
-        if text.is_empty() {
-            return Err(AppError::Stt("no speech detected".to_string()));
+        let mut last_error = AppError::Stt("no attempt made".to_string());
+
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
+            }
+
+            let form = self.build_form(&audio, mime_type, language_hint)?;
+            let resp = match self
+                .http
+                .post(&self.url)
+                .bearer_auth(&self.api_key)
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    last_error = AppError::Http(e);
+                    continue;
+                }
+            };
+
+            let status = resp.status();
+            if status.is_success() {
+                let parsed: WhisperResponse = resp.json().await?;
+                let text = parsed.text.trim().to_string();
+                if text.is_empty() {
+                    return Err(AppError::Stt("no speech detected".to_string()));
+                }
+                return Ok(Transcript {
+                    text,
+                    language: parsed
+                        .language
+                        .as_deref()
+                        .and_then(language_code)
+                        .map(str::to_string),
+                });
+            }
+
+            let body = resp.text().await.unwrap_or_default();
+            let short: String = body.chars().take(300).collect();
+            last_error = AppError::Stt(format!("{status}: {short}"));
+
+            let retryable = status.as_u16() == 429 || status.is_server_error();
+            if !retryable {
+                break;
+            }
         }
 
-        Ok(Transcript {
-            text,
-            language: parsed
-                .language
-                .as_deref()
-                .and_then(language_code)
-                .map(str::to_string),
-        })
+        Err(last_error)
     }
 }
 

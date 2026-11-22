@@ -1,0 +1,16 @@
+# Rust build output
+/target
+
+# Secrets, never commit real keys
+.env
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs and local data
+*.log
+/data/

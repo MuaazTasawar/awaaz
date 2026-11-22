@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: awaaz-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: awaaz
+      POSTGRES_PASSWORD: awaaz
+      POSTGRES_DB: awaaz
+    ports:
+      - "5433:5432"
+    volumes:
+      - awaaz_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U awaaz -d awaaz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # The app service needs the Dockerfile from Phase 8.
+  # Until then, run only the database:  docker compose up -d db
+  app:
+    build: .
+    container_name: awaaz-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://awaaz:awaaz@db:5432/awaaz
+      BIND_ADDR: 0.0.0.0:8080
+    ports:
+      - "8080:8080"
+
+volumes:
+  awaaz_pgdata:

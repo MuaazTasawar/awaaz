@@ -11,6 +11,7 @@ use sqlx::PgPool;
 
 use crate::{
     error::{AppError, Result},
+    nlp::{pakistan_today, ParseContext},
     state::AppState,
     whatsapp::{IncomingMessage, MessageContent, WebhookPayload},
 };
@@ -100,20 +101,29 @@ async fn claim_message(db: &PgPool, message_id: &str) -> Result<bool> {
     Ok(result.rows_affected() == 1)
 }
 
-/// TEMPORARY handler used until Phase 6 plugs in the full voice pipeline.
-/// It proves the whole WhatsApp plumbing works: signature, parsing, media download, replies.
+/// TEMPORARY handler used until Phase 6 plugs in the full pipeline.
+/// For voice notes it shows what was heard and what was understood, which makes it easy
+/// to try Urdu, Punjabi, Pashto and Sindhi samples against the real services.
 async fn handle_incoming(state: AppState, msg: IncomingMessage) -> Result<()> {
     let wa = &state.whatsapp;
 
     match msg.content {
-        MessageContent::Audio { media_id, .. } => {
+        MessageContent::Audio {
+            media_id,
+            mime_type,
+        } => {
             wa.mark_read(&msg.id).await.ok();
-            let (bytes, mime) = wa.download_media(&media_id).await?;
-            let reply = format!(
-                "Voice note received ({} KB, {mime}). Understanding it arrives in the next phases.",
-                bytes.len() / 1024
-            );
-            wa.send_text(&msg.from, &reply).await?;
+            match understand_voice(&state, &media_id, &mime_type).await {
+                Ok(reply) => wa.send_text(&msg.from, &reply).await?,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not understand voice note");
+                    wa.send_text(
+                        &msg.from,
+                        "Sorry, I could not understand that voice note. Please try again.",
+                    )
+                    .await?;
+                }
+            }
         }
         MessageContent::Text(text) => {
             wa.send_text(&msg.from, &format!("Received: {text}")).await?;
@@ -128,4 +138,31 @@ async fn handle_incoming(state: AppState, msg: IncomingMessage) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Download, transcribe and parse one voice note; return a debug-style reply.
+async fn understand_voice(state: &AppState, media_id: &str, mime_type: &str) -> Result<String> {
+    let (bytes, downloaded_mime) = state.whatsapp.download_media(media_id).await?;
+    let mime = if downloaded_mime.is_empty() {
+        mime_type
+    } else {
+        downloaded_mime.as_str()
+    };
+
+    let transcript = state.stt.transcribe(bytes, mime, None).await?;
+
+    let ctx = ParseContext {
+        today: pakistan_today(),
+        employee_names: Vec::new(),
+        party_names: Vec::new(),
+    };
+    let parsed = state.parser.parse(&transcript.text, &ctx).await?;
+    let understood = serde_json::to_string(&parsed.command).unwrap_or_default();
+
+    Ok(format!(
+        "Heard: {}\nLanguage: {}\nUnderstood: {}",
+        transcript.text,
+        parsed.language.as_deref().unwrap_or("?"),
+        understood
+    ))
 }

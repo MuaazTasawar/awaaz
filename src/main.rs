@@ -1,4 +1,4 @@
-use awaaz::{config::Config, db, state::AppState};
+use awaaz::{config::Config, db, state::AppState, whatsapp};
 use axum::{routing::get, Router};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .merge(whatsapp::webhook::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

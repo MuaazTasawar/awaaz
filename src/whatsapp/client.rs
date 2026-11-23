@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{io::Write, time::Duration};
 
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
@@ -16,14 +16,18 @@ const MAX_TEXT_LEN: usize = 4000;
 const MAX_BUTTON_TITLE_LEN: usize = 20;
 /// Whisper accepts files up to 25 MB; refuse bigger downloads early.
 const MAX_MEDIA_BYTES: usize = 25 * 1024 * 1024;
+/// Where dry-run replies are written, in the folder where the app was started.
+const OUTBOX_FILE: &str = "outbox.txt";
 
 /// Thin wrapper over the WhatsApp Cloud API: send text, send Yes/No buttons, download voice notes.
+/// In dry-run mode nothing is sent; replies go to the log and to outbox.txt instead.
 #[derive(Clone)]
 pub struct WhatsAppClient {
     http: Client,
     access_token: String,
     phone_number_id: String,
     api_version: String,
+    dry_run: bool,
 }
 
 impl WhatsAppClient {
@@ -33,16 +37,39 @@ impl WhatsAppClient {
             .build()
             .expect("failed to build HTTP client");
 
+        if config.whatsapp_dry_run {
+            tracing::warn!(
+                "WHATSAPP_DRY_RUN is on: replies are NOT sent to WhatsApp, see the log and {OUTBOX_FILE}"
+            );
+        }
+
         Self {
             http,
             access_token: config.whatsapp_access_token.clone(),
             phone_number_id: config.whatsapp_phone_number_id.clone(),
             api_version: config.whatsapp_api_version.clone(),
+            dry_run: config.whatsapp_dry_run,
         }
     }
 
     fn messages_url(&self) -> String {
         format!("{GRAPH_BASE}/{}/{}/messages", self.api_version, self.phone_number_id)
+    }
+
+    /// Dry-run output: the terminal shows it, and outbox.txt keeps it in a file that opens
+    /// correctly in an editor (terminals often draw Urdu and Pashto badly).
+    fn log_outbox(&self, to: &str, text: &str) {
+        tracing::info!(target: "awaaz::outbox", "DRY RUN reply to {to}:\n{text}");
+
+        let stamp = chrono::Utc::now().format("%H:%M:%S");
+        let entry = format!("[{stamp} UTC] to {to}\n{text}\n{}\n", "-".repeat(40));
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(OUTBOX_FILE)
+        {
+            let _ = file.write_all(entry.as_bytes());
+        }
     }
 
     async fn post_message(&self, body: Value) -> Result<()> {
@@ -59,6 +86,11 @@ impl WhatsAppClient {
 
     /// Send a plain text message.
     pub async fn send_text(&self, to: &str, text: &str) -> Result<()> {
+        if self.dry_run {
+            self.log_outbox(to, text);
+            return Ok(());
+        }
+
         self.post_message(json!({
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
@@ -78,6 +110,12 @@ impl WhatsAppClient {
         yes_title: &str,
         no_title: &str,
     ) -> Result<()> {
+        if self.dry_run {
+            let shown = format!("{body}\n\n[ {yes_title} ]   [ {no_title} ]");
+            self.log_outbox(to, &shown);
+            return Ok(());
+        }
+
         self.post_message(json!({
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
@@ -101,6 +139,10 @@ impl WhatsAppClient {
 
     /// Mark an incoming message as read (blue ticks), so the user knows it arrived.
     pub async fn mark_read(&self, message_id: &str) -> Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+
         self.post_message(json!({
             "messaging_product": "whatsapp",
             "status": "read",

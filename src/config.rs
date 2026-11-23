@@ -25,6 +25,8 @@ pub struct Config {
     pub whatsapp_access_token: String,
     pub whatsapp_phone_number_id: String,
     pub whatsapp_api_version: String,
+    /// When true, replies are written to the log and outbox.txt instead of being sent.
+    pub whatsapp_dry_run: bool,
 
     /// Base URL of an OpenAI-compatible speech API, without a trailing slash.
     pub stt_base_url: String,
@@ -58,6 +60,13 @@ fn optional(key: &str, default: &str) -> String {
 
 fn trim_url(url: String) -> String {
     url.trim().trim_end_matches('/').to_string()
+}
+
+fn flag(key: &str) -> bool {
+    matches!(
+        optional(key, "false").to_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 impl Config {
@@ -98,6 +107,7 @@ impl Config {
             whatsapp_access_token: required("WHATSAPP_ACCESS_TOKEN")?,
             whatsapp_phone_number_id: required("WHATSAPP_PHONE_NUMBER_ID")?,
             whatsapp_api_version: optional("WHATSAPP_API_VERSION", "v21.0"),
+            whatsapp_dry_run: flag("WHATSAPP_DRY_RUN"),
 
             stt_base_url: trim_url(optional("STT_BASE_URL", "https://api.groq.com/openai/v1")),
             stt_api_key: required("STT_API_KEY")?,

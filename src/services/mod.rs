@@ -1,4 +1,5 @@
 pub mod ledger;
+pub mod onboarding;
 pub mod reports;
 pub mod tasks;
 
